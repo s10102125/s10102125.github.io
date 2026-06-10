@@ -1,0 +1,535 @@
+<?php
+require_once 'includes/functions.php';
+require_login();
+require_once 'includes/db.php';
+
+$page_title = '月曆';
+$current_page = 'calendar.php';
+
+// Handle adding new event
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
+    $action = $_POST['action'] ?? '';
+    if ($action === 'add_event') {
+        $type = $_POST['type'] ?? 'todo'; // 'assignment' or 'todo'
+        $title = trim($_POST['title']);
+        $due_date = $_POST['due_date'] ?? '';
+        $end_date = $_POST['end_date'] ?? $due_date;
+        if (($_POST['date_mode'] ?? 'single') === 'single') {
+            $end_date = $due_date;
+        }
+        if ($end_date && $due_date && $end_date < $due_date) {
+            $end_date = $due_date;
+        }
+        $course_id = isset($_POST['course_id']) ? (int)$_POST['course_id'] : null;
+        
+        if ($title && $due_date) {
+            if ($type === 'assignment' && $course_id) {
+                $pdo->prepare("INSERT INTO assignments (course_id, title, due_date, end_date, priority, status) VALUES (?, ?, ?, ?, ?, ?)")
+                    ->execute([$course_id, $title, $due_date, $end_date, 'normal', 'pending']);
+                flash('作業已新增到月曆！');
+            } elseif ($type === 'todo') {
+$loc = trim($_POST['event_location'] ?? '');
+                $memo = trim($_POST['event_memo'] ?? '');
+                $pdo->prepare("INSERT INTO todos (title, due_date, end_date, priority, status, description) VALUES (?, ?, ?, ?, ?, ?)")
+                    ->execute([$title, $due_date, $end_date, 'normal', 'pending', ($loc || $memo) ? ('地點：'.($loc?:'—').' | 備忘：'.($memo?:'—')) : '']);
+                flash('待辦事項已新增到月曆！');
+            }
+            redirect("calendar.php?y=" . ($_POST['y'] ?? date('Y')) . "&m=" . ($_POST['m'] ?? date('n')));
+        }
+    } elseif ($action === 'edit_event') {
+        $type = $_POST['type'] ?? 'todo';
+        $id = (int)$_POST['id'];
+        $title = trim($_POST['title']);
+        $due_date = $_POST['due_date'] ?? '';
+        $end_date = $_POST['end_date'] ?? $due_date;
+        if (($_POST['date_mode'] ?? 'single') === 'single') {
+            $end_date = $due_date;
+        }
+        if ($end_date && $due_date && $end_date < $due_date) {
+            $end_date = $due_date;
+        }
+        $course_id = isset($_POST['course_id']) ? (int)$_POST['course_id'] : null;
+        
+        if ($type === 'assignment') {
+            $pdo->prepare("UPDATE assignments SET title=?, due_date=?, end_date=?, course_id=? WHERE id=?")
+                ->execute([$title, $due_date, $end_date, $course_id, $id]);
+            flash('作業已更新！');
+        } else {
+$loc2 = trim($_POST['event_location'] ?? '');
+            $memo2 = trim($_POST['event_memo'] ?? '');
+            $desc2 = ($loc2 || $memo2) ? ('地點：'.($loc2?:'—').' | 備忘：'.($memo2?:'—')) : '';
+            $pdo->prepare("UPDATE todos SET title=?, due_date=?, end_date=?, description=? WHERE id=?")
+                ->execute([$title, $due_date, $end_date, $desc2, $id]);
+            flash('待辦事項已更新！');
+        }
+        redirect("calendar.php?y=" . ($_POST['y'] ?? date('Y')) . "&m=" . ($_POST['m'] ?? date('n')));
+    } elseif ($action === 'delete_event') {
+        $type = $_POST['type'] ?? 'todo';
+        $id = (int)$_POST['id'];
+        
+        if ($type === 'assignment') {
+            $pdo->prepare("DELETE FROM assignments WHERE id=?")->execute([$id]);
+        } else {
+            $pdo->prepare("DELETE FROM todos WHERE id=?")->execute([$id]);
+        }
+        flash('事項已刪除！');
+        redirect("calendar.php?y=" . ($_POST['y'] ?? date('Y')) . "&m=" . ($_POST['m'] ?? date('n')));
+    }
+}
+
+$year  = (int)($_GET['y'] ?? date('Y'));
+$month = (int)($_GET['m'] ?? date('n'));
+if ($month < 1) { $month = 12; $year--; }
+if ($month > 12) { $month = 1; $year++; }
+
+$prev = ['y'=>$month==1?$year-1:$year, 'm'=>$month==1?12:$month-1];
+$next = ['y'=>$month==12?$year+1:$year, 'm'=>$month==12?1:$month+1];
+
+$first_day = mktime(0,0,0,$month,1,$year);
+$days_in_month = (int)date('t', $first_day);
+$start_dow = (int)date('N', $first_day); // 1=Mon
+
+$month_start = sprintf('%04d-%02d-01', $year, $month);
+$month_end   = sprintf('%04d-%02d-%02d', $year, $month, $days_in_month);
+
+function each_event_date(string $start, ?string $end): array {
+    if (!$start) return [];
+    $end = $end ?: $start;
+    if ($end < $start) $end = $start;
+    $dates = [];
+    $current = strtotime($start);
+    $last = strtotime($end);
+    while ($current <= $last) {
+        $dates[] = date('Y-m-d', $current);
+        $current = strtotime('+1 day', $current);
+    }
+    return $dates;
+}
+
+// Gather events for the month
+$assignments = $pdo->prepare("
+    SELECT a.id, a.course_id, due_date as date, COALESCE(end_date, due_date) as end_date, title, 'assignment' as type, c.color, c.name as course_name
+    FROM assignments a LEFT JOIN courses c ON a.course_id=c.id
+    WHERE due_date <= ? AND COALESCE(end_date, due_date) >= ? AND status='pending'
+");
+$assignments->execute([$month_end, $month_start]);
+
+$todos = $pdo->prepare("
+    SELECT id, NULL as course_id, due_date as date, COALESCE(end_date, due_date) as end_date, title, 'todo' as type, '#8b5cf6' as color, NULL as course_name, description
+    FROM todos WHERE due_date <= ? AND COALESCE(end_date, due_date) >= ? AND status='pending'
+");
+$todos->execute([$month_end, $month_start]);
+
+// Build events map
+$events = [];
+foreach (array_merge($assignments->fetchAll(), $todos->fetchAll()) as $e) {
+    foreach (each_event_date($e['date'], $e['end_date']) as $event_date) {
+        if ($event_date < $month_start || $event_date > $month_end) continue;
+        $copy = $e;
+        $copy['display_date'] = $event_date;
+        $events[$event_date][] = $copy;
+    }
+}
+
+// Schedule intentionally not shown on calendar (events only)
+
+// Get all courses for form
+$all_courses = $pdo->query("SELECT id, name, color FROM courses ORDER BY name")->fetchAll();
+
+require_once 'includes/header.php';
+?>
+<style>
+.cal-grid {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: var(--card-radius);
+    overflow: hidden;
+}
+.cal-header-cell {
+    background: var(--bg3);
+    text-align: center;
+    padding: 10px 0;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text3);
+    text-transform: uppercase;
+    letter-spacing: .8px;
+}
+.cal-cell {
+    background: var(--bg2);
+    min-height: 110px;
+    padding: 8px;
+    position: relative;
+    cursor: pointer;
+    transition: background .1s;
+}
+.cal-cell:hover { background: var(--bg3); }
+.cal-cell.today { background: rgba(91,127,255,.07); }
+.cal-cell.today .cal-day { color: var(--accent); background: var(--accent); color: white; border-radius: 50%; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; }
+.cal-cell.other-month { opacity: .35; }
+.cal-day { font-size: 12px; font-family: 'Space Mono', monospace; color: var(--text2); margin-bottom: 4px; }
+.cal-event {
+    font-size: 11px;
+    padding: 2px 5px;
+    border-radius: 4px;
+    margin-bottom: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: pointer;
+}
+.cal-event.assignment { background: rgba(239,68,68,.15); color: var(--red); }
+.cal-event.todo { background: rgba(167,139,250,.15); color: var(--purple); }
+.cal-event.schedule { background: rgba(91,127,255,.15); color: var(--accent2); }
+.cal-event.multi-day { border-left: 3px solid currentColor; }
+.cal-more { font-size: 10px; color: var(--text3); margin-top: 2px; }
+/* Calendar modal uses header.php .modal-overlay / .modal / .open */
+.modal-input {
+    width: 100%;
+    padding: 10px 12px;
+    margin-bottom: 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg3);
+    color: var(--text);
+    font-family: 'Noto Sans TC', sans-serif;
+    font-size: 14px;
+    outline: none;
+    transition: border-color .15s;
+}
+.modal-input:focus { border-color: var(--accent); }
+.modal-input option { background: var(--bg3); }
+.modal-buttons {
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+    margin-top: 20px;
+}
+.date-mode-row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 14px;
+}
+.date-mode-row label {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-height: 38px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    cursor: pointer;
+    color: var(--text2);
+}
+.date-mode-row input { accent-color: var(--accent); }
+.date-range-row {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+}
+@media (max-width: 560px) {
+    .date-range-row { grid-template-columns: 1fr; }
+}
+</style>
+
+<div style="display:flex;align-items:center;gap:12px;margin-bottom:20px">
+    <a href="?y=<?=$prev['y']?>&m=<?=$prev['m']?>" class="btn btn-ghost">‹</a>
+    <h2 style="font-size:20px;font-weight:700;color:var(--text);min-width:140px;text-align:center">
+        <?= $year ?>年<?= $month ?>月
+    </h2>
+    <a href="?y=<?=$next['y']?>&m=<?=$next['m']?>" class="btn btn-ghost">›</a>
+    <a href="?y=<?=date('Y')?>&m=<?=date('n')?>" class="btn btn-ghost btn-sm">今天</a>
+    <button class="btn btn-accent btn-sm" onclick="openAddEventModal()" style="margin-left:auto">+ 新增事項</button>
+    <div style="display:flex;gap:12px;font-size:12px;color:var(--text3)">
+        <span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;border-radius:2px;background:rgba(239,68,68,.3);display:inline-block"></span>作業截止</span>
+        <span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;border-radius:2px;background:rgba(167,139,250,.3);display:inline-block"></span>待辦事項</span>
+    </div>
+</div>
+
+<div class="cal-grid">
+    <?php foreach(['一','二','三','四','五','六','日'] as $d): ?>
+    <div class="cal-header-cell">週<?=$d?></div>
+    <?php endforeach; ?>
+
+    <?php
+    // Padding days from previous month
+    $pad = $start_dow - 1;
+    $prev_days = (int)date('t', mktime(0,0,0,$prev['m'],1,$prev['y']));
+    for ($i=$pad; $i>0; $i--) {
+        $d = $prev_days - $i + 1;
+        $date_str = sprintf('%04d-%02d-%02d', $prev['y'], $prev['m'], $d);
+        echo "<div class='cal-cell other-month'><div class='cal-day'>$d</div></div>";
+    }
+
+    $today = date('Y-m-d');
+    for ($d=1; $d<=$days_in_month; $d++) {
+        $date_str = sprintf('%04d-%02d-%02d', $year, $month, $d);
+        $dow = (int)date('N', mktime(0,0,0,$month,$d,$year));
+        $is_today = $date_str === $today;
+
+        $day_events = $events[$date_str] ?? [];
+
+        $cls = $is_today ? ' today' : '';
+        echo "<div class='cal-cell$cls'>";
+        echo "<div class='cal-day'>$d</div>";
+
+        $shown = 0;
+        foreach($day_events as $e) {
+            if($shown>=4) break;
+            $cls2 = $e['type'];
+            $eid  = $e['id'] ?? 0;   // guard against missing id
+            $label = $e['type']==='assignment' ? svg_icon('assignments').' ' : svg_icon('todos').' ';
+            $is_multi = ($e['end_date'] ?? $e['date']) !== $e['date'];
+            $eventJson = htmlspecialchars(json_encode([
+                'id'=>$eid,
+                'title'=>$e['title'],
+                'type'=>$e['type'],
+                'course_id'=>$e['course_id'] ?? '',
+                'course'=>($e['course_name']??null)?$e['course_name']:null,
+                'date'=>$e['date'],
+                'end_date'=>$e['end_date'] ?? $e['date'],
+                'description'=>$e['description'] ?? ''
+            ]));
+            $range = $is_multi ? " · ".date('m/d', strtotime($e['date']))."-".date('m/d', strtotime($e['end_date'])) : '';
+            echo "<div class='cal-event $cls2".($is_multi?' multi-day':'')."' style='cursor:pointer' onclick='editCalendarEvent($eventJson)' title='".h($e['title']).h($range)."'>".$label.h(mb_substr($e['title'],0,10)).h($range)."</div>";
+            $shown++;
+        }
+        $total = count($day_events);
+        if($total > 4) echo "<div class='cal-more'>+".($total-4)." 更多</div>";
+        echo "</div>";
+    }
+
+    // Trailing days
+    $cells_used = $pad + $days_in_month;
+    $trailing = (7 - ($cells_used % 7)) % 7;
+    for ($d=1; $d<=$trailing; $d++) {
+        echo "<div class='cal-cell other-month'><div class='cal-day'>$d</div></div>";
+    }
+    ?>
+</div>
+
+<!-- ── Modals（JS teleport 會把它們移到 body 最外層）── -->
+<!-- Add Event Modal -->
+<div id="addEventModal" class="modal-overlay">
+    <div class="modal">
+        <div class="modal-title">新增事項</div>
+        <form method="POST">
+            <input type="hidden" name="action" value="add_event">
+            <input type="hidden" name="y" value="<?=$year?>">
+            <input type="hidden" name="m" value="<?=$month?>">
+            
+            <div style="margin-bottom: 14px;">
+                <label style="display: block; font-size: 12px; font-weight: 600; color: var(--text3); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;">類型</label>
+                <div style="display: flex; gap: 10px;">
+                    <label style="display: flex; align-items: center; gap: 6px; flex: 1; cursor: pointer;">
+                        <input type="radio" name="type" value="todo" checked required>
+                        <span>待辦事項</span>
+                    </label>
+                    <label style="display: flex; align-items: center; gap: 6px; flex: 1; cursor: pointer;">
+                        <input type="radio" name="type" value="assignment" required>
+                        <span>課程作業</span>
+                    </label>
+                </div>
+            </div>
+            
+            <div id="courseField" style="display: none; margin-bottom: 14px;">
+                <label style="display: block; font-size: 12px; font-weight: 600; color: var(--text3); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;">課程</label>
+                <select name="course_id" class="modal-input">
+                    <option value="">選擇課程</option>
+                    <?php foreach($all_courses as $c): ?>
+                    <option value="<?= $c['id'] ?>"><?= h($c['name']) ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            
+            <div style="margin-bottom: 14px;">
+                <label style="display: block; font-size: 12px; font-weight: 600; color: var(--text3); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;">事項名稱</label>
+                <input type="text" name="title" class="modal-input" placeholder="例如：期中考、數學作業" required>
+            </div>
+            
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">
+                <div>
+                    <label style="display: block; font-size: 12px; font-weight: 600; color: var(--text3); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;">地點</label>
+                    <input type="text" name="event_location" class="modal-input" placeholder="教室、地點…">
+                </div>
+                <div>
+                    <label style="display: block; font-size: 12px; font-weight: 600; color: var(--text3); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;">備忘錄</label>
+                    <input type="text" name="event_memo" class="modal-input" placeholder="備注事項…">
+                </div>
+            </div>
+            
+            <div>
+                <label style="display: block; font-size: 12px; font-weight: 600; color: var(--text3); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;">日期</label>
+                <div class="date-mode-row">
+                    <label><input type="radio" name="date_mode" value="single" checked onchange="toggleDateMode('add')"> 一天</label>
+                    <label><input type="radio" name="date_mode" value="range" onchange="toggleDateMode('add')"> 多天</label>
+                </div>
+                <div class="date-range-row">
+                    <div>
+                        <label style="display: block; font-size: 12px; color: var(--text3); margin-bottom: 6px;">開始</label>
+                        <input type="date" name="due_date" id="addStartDate" class="modal-input" required onchange="syncEndDate('add')">
+                    </div>
+                    <div id="addEndDateWrap" style="display:none">
+                        <label style="display: block; font-size: 12px; color: var(--text3); margin-bottom: 6px;">結束</label>
+                        <input type="date" name="end_date" id="addEndDate" class="modal-input">
+                    </div>
+                </div>
+            </div>
+            
+            <div class="modal-buttons">
+                <button type="button" class="btn btn-ghost" onclick="closeModal('addEventModal')">取消</button>
+                <button type="submit" class="btn btn-primary">新增</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Edit Event Modal -->
+<div id="editEventModal" class="modal-overlay">
+    <div class="modal">
+        <div class="modal-title">編輯事項</div>
+        <form method="POST">
+            <input type="hidden" name="action" value="edit_event">
+            <input type="hidden" name="type" id="editEventType">
+            <input type="hidden" name="id" id="editEventId">
+            <input type="hidden" name="y" value="<?=$year?>">
+            <input type="hidden" name="m" value="<?=$month?>">
+            
+            <div style="margin-bottom: 14px;">
+                <label style="display: block; font-size: 12px; font-weight: 600; color: var(--text3); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;">事項名稱</label>
+                <input type="text" name="title" id="editEventTitle" class="modal-input" required>
+            </div>
+            
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">
+                <div>
+                    <label style="display: block; font-size: 12px; font-weight: 600; color: var(--text3); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;">地點</label>
+                    <input type="text" name="event_location" id="editEventLocation" class="modal-input" placeholder="教室、地點…">
+                </div>
+                <div>
+                    <label style="display: block; font-size: 12px; font-weight: 600; color: var(--text3); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;">備忘錄</label>
+                    <input type="text" name="event_memo" id="editEventMemo" class="modal-input" placeholder="備注事項…">
+                </div>
+            </div>
+            
+            <div id="editCourseField" style="display: none; margin-bottom: 14px;">
+                <label style="display: block; font-size: 12px; font-weight: 600; color: var(--text3); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;">課程</label>
+                <select name="course_id" id="editEventCourse" class="modal-input">
+                    <option value="">選擇課程</option>
+                    <?php foreach($all_courses as $c): ?>
+                    <option value="<?= $c['id'] ?>"><?= h($c['name']) ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            
+            <div>
+                <label style="display: block; font-size: 12px; font-weight: 600; color: var(--text3); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;">日期</label>
+                <div class="date-mode-row">
+                    <label><input type="radio" name="date_mode" value="single" id="editDateModeSingle" onchange="toggleDateMode('edit')"> 一天</label>
+                    <label><input type="radio" name="date_mode" value="range" id="editDateModeRange" onchange="toggleDateMode('edit')"> 多天</label>
+                </div>
+                <div class="date-range-row">
+                    <div>
+                        <label style="display: block; font-size: 12px; color: var(--text3); margin-bottom: 6px;">開始</label>
+                        <input type="date" name="due_date" id="editEventDate" class="modal-input" required onchange="syncEndDate('edit')">
+                    </div>
+                    <div id="editEndDateWrap" style="display:none">
+                        <label style="display: block; font-size: 12px; color: var(--text3); margin-bottom: 6px;">結束</label>
+                        <input type="date" name="end_date" id="editEventEndDate" class="modal-input">
+                    </div>
+                </div>
+            </div>
+            
+            <div class="modal-buttons">
+                <button type="button" class="btn btn-ghost" onclick="closeModal('editEventModal')">取消</button>
+                <button type="submit" class="btn btn-primary">儲存</button>
+                <button type="button" class="btn btn-danger" onclick="deleteCalendarEvent()">刪除</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Delete Event Form (hidden) -->
+<form method="POST" id="deleteEventForm" style="display:none">
+    <input type="hidden" name="action" value="delete_event">
+    <input type="hidden" name="type" id="deleteEventType">
+    <input type="hidden" name="id" id="deleteEventId">
+    <input type="hidden" name="y" value="<?=$year?>">
+    <input type="hidden" name="m" value="<?=$month?>">
+</form>
+
+<script>
+function openAddEventModal() {
+    toggleDateMode('add');
+    openModal('addEventModal');
+}
+function getDateMode(prefix) {
+    const modal = document.getElementById(prefix === 'add' ? 'addEventModal' : 'editEventModal');
+    return modal.querySelector('input[name="date_mode"]:checked')?.value || 'single';
+}
+function toggleDateMode(prefix) {
+    const isRange = getDateMode(prefix) === 'range';
+    const wrap = document.getElementById(prefix + 'EndDateWrap');
+    const end = document.getElementById(prefix === 'add' ? 'addEndDate' : 'editEventEndDate');
+    wrap.style.display = isRange ? 'block' : 'none';
+    end.required = isRange;
+    syncEndDate(prefix);
+}
+function syncEndDate(prefix) {
+    const start = document.getElementById(prefix === 'add' ? 'addStartDate' : 'editEventDate');
+    const end = document.getElementById(prefix === 'add' ? 'addEndDate' : 'editEventEndDate');
+    if (!start || !end) return;
+    end.min = start.value || '';
+    if (getDateMode(prefix) === 'single') {
+        end.value = start.value;
+    } else if (start.value && (!end.value || end.value < start.value)) {
+        end.value = start.value;
+    }
+}
+function editCalendarEvent(e) {
+    document.getElementById('editEventId').value    = e.id;
+    document.getElementById('editEventType').value  = e.type;
+    document.getElementById('deleteEventType').value = e.type;
+    document.getElementById('deleteEventId').value  = e.id;
+    document.getElementById('editEventTitle').value = e.title;
+    // Parse memo/location from description if present
+    var loc = '', memo = '';
+    if (e.description) {
+        var locMatch = e.description.match(/地點：([^|]+)/);
+        var memoMatch = e.description.match(/備忘：(.+)/);
+        if (locMatch) loc = locMatch[1].trim() === '—' ? '' : locMatch[1].trim();
+        if (memoMatch) memo = memoMatch[1].trim() === '—' ? '' : memoMatch[1].trim();
+    }
+    var locEl = document.getElementById('editEventLocation');
+    var memoEl = document.getElementById('editEventMemo');
+    if (locEl) locEl.value = loc;
+    if (memoEl) memoEl.value = memo;
+    document.getElementById('editEventDate').value  = e.date;
+    document.getElementById('editEventEndDate').value = e.end_date || e.date;
+    document.getElementById('editEventCourse').value = e.course_id || '';
+    document.getElementById(e.end_date && e.end_date !== e.date ? 'editDateModeRange' : 'editDateModeSingle').checked = true;
+    
+    document.getElementById('editCourseField').style.display =
+        e.type === 'assignment' ? 'block' : 'none';
+    toggleDateMode('edit');
+    
+    openModal('editEventModal');
+}
+function deleteCalendarEvent() {
+    if (confirm('確定刪除此事項？')) {
+        document.getElementById('deleteEventForm').submit();
+    }
+}
+document.querySelectorAll('input[name="type"]').forEach(el => {
+    el.addEventListener('change', function() {
+        const courseField = document.getElementById('courseField');
+        courseField.style.display = this.value === 'assignment' ? 'block' : 'none';
+        document.querySelector('select[name="course_id"]').required = this.value === 'assignment';
+    });
+});
+</script>
+
+<?php require_once 'includes/footer.php'; ?>
